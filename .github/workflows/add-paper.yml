@@ -1,0 +1,70 @@
+name: Add paper from Teams
+
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      text:
+        description: "DOIs or paper links to add (space-separated)"
+        required: true
+
+# One run at a time, in order, so two papers posted together never conflict.
+concurrency:
+  group: add-paper
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  add:
+    # Only issues created by the Power Automate flow (title starts with "Paper:").
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.issue.title, 'Paper:')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The issue body is untrusted text. The script reads it from the event
+      # file itself; it is never pasted into a shell command.
+      - name: Fetch BibTeX
+        id: add
+        env:
+          CROSSREF_MAILTO: ${{ vars.CROSSREF_MAILTO }}
+        run: python scripts/add_refs.py > "$RUNNER_TEMP/summary.md"
+
+      - name: Commit
+        if: steps.add.outputs.added != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          git add refs library.bib
+          git commit -m "Add ${{ steps.add.outputs.added }} reference(s) from Teams"
+          git pull --rebase
+          git push
+
+      - name: Report back on the issue
+        if: github.event_name == 'issues'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number }}
+          ADDED: ${{ steps.add.outputs.added }}
+          FAILED: ${{ steps.add.outputs.failed }}
+        run: |
+          gh issue comment "$ISSUE" --body-file "$RUNNER_TEMP/summary.md"
+          if [ "$FAILED" != "0" ]; then
+            gh label create needs-attention --color D93F0B --force >/dev/null
+            gh issue edit "$ISSUE" --add-label needs-attention
+          fi
+          if [ "$FAILED" = "0" ]; then
+            gh issue close "$ISSUE"
+          fi
+
+      - name: Show summary
+        if: always()
+        run: cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
